@@ -5,7 +5,7 @@
 
 //=====[Defines]===============================================================
 
-#define NUMBER_OF_KEYS                           4
+#define NUMBER_OF_KEYS                           3
 #define BLINKING_TIME_GAS_ALARM               1000
 #define BLINKING_TIME_OVER_TEMP_ALARM          500
 #define BLINKING_TIME_GAS_AND_OVER_TEMP_ALARM  100
@@ -58,8 +58,8 @@ bool overTempDetector = OFF;
 int numberOfIncorrectCodes = 0;
 int numberOfHashKeyReleasedEvents = 0;
 int keyBeingCompared    = 0;
-char codeSequence[NUMBER_OF_KEYS]   = { '1', '8', '0', '5' };
-char keyPressed[NUMBER_OF_KEYS] = { '0', '0', '0', '0' };
+char codeSequence[NUMBER_OF_KEYS]   = { '1', '8', '0' };
+char keyPressed[NUMBER_OF_KEYS] = { '0', '0', '0' };
 int accumulatedTimeAlarm = 0;
 
 bool alarmLastState        = OFF;
@@ -122,6 +122,41 @@ int main()
 {
     inputsInit();
     outputsInit();
+	uartUsb.write("Enter 3‑digit deactivation code, end with '#'\r\n> ", 49);
+
+    // 2) Read new code from keypad
+    char newCode[NUMBER_OF_KEYS] = {0};
+    int  idx = 0;
+    while (true) {
+        char key = matrixKeypadUpdate();
+        if (key != '\0') {
+
+            // digit?
+            if (key >= '0' && key <= '9' && idx < NUMBER_OF_KEYS) {
+                newCode[idx++] = key;
+                uartUsb.write(&key, 1);    // echo digit
+            }
+            // end entry on '#' once 3 digits collected
+            if (key == '#' && idx == NUMBER_OF_KEYS) {
+                uartUsb.write("\r\n", 2);
+                break;
+            }
+        }
+    }
+
+    // 3) Save the new code
+    for (int i = 0; i < NUMBER_OF_KEYS; i++) {
+        codeSequence[i] = newCode[i];
+    }
+    // 4) Echo the newly set code back to the user
+    char buf[32];
+    int len = sprintf(buf, "New code is: %c %c %c\r\n",
+                      codeSequence[0],
+                      codeSequence[1],
+                      codeSequence[2]);
+    uartUsb.write(buf, len);
+
+    uartUsb.write("Code set. System ready.\r\n", 27);
     while (true) {
         alarmActivationUpdate();
         alarmDeactivationUpdate();
@@ -221,6 +256,7 @@ void alarmDeactivationUpdate()
         char keyReleased = matrixKeypadUpdate();
         if( keyReleased != '\0' && keyReleased != '#' ) {
             keyPressed[matrixKeypadCodeIndex] = keyReleased;
+            uartUsb.write(&keyReleased, 1);    // echo digit
             if( matrixKeypadCodeIndex >= NUMBER_OF_KEYS ) {
                 matrixKeypadCodeIndex = 0;
             } else {
@@ -228,6 +264,7 @@ void alarmDeactivationUpdate()
             }
         }
         if( keyReleased == '#' ) {
+            uartUsb.write("\r\n", 2);
             if( incorrectCodeLed ) {
                 numberOfHashKeyReleasedEvents++;
                 if( numberOfHashKeyReleasedEvents >= 2 ) {
@@ -286,7 +323,7 @@ void uartTask()
             break;
             
         case '4':
-            uartUsb.write( "Please enter the four digits numeric code ", 42 );
+            uartUsb.write( "Please enter the three digits numeric code ", 42 );
             uartUsb.write( "to deactivate the alarm: ", 25 );
 
             incorrectCode = false;
@@ -314,7 +351,7 @@ void uartTask()
             break;
 
         case '5':
-            uartUsb.write( "Please enter the new four digits numeric code ", 46 );
+            uartUsb.write( "Please enter the new three digits numeric code ", 46 );
             uartUsb.write( "to deactivate the alarm: ", 25 );
 
             for ( keyBeingCompared = 0;
@@ -483,32 +520,39 @@ void eventLogUpdate()
     SBLastState = systemBlockedLed;
 }
 
-void systemElementStateUpdate( bool lastState,
-                               bool currentState,
-                               const char* elementName )
+void systemElementStateUpdate(bool lastState,
+                              bool currentState,
+                              const char* elementName)
 {
-    char eventAndStateStr[EVENT_NAME_MAX_LENGTH] = "";
+    if (lastState == currentState) return;
 
-    if ( lastState != currentState ) {
+    // 1) Format event name
+    char eventStr[EVENT_NAME_MAX_LENGTH];
+    snprintf(eventStr, sizeof(eventStr), "%s_%s",
+        elementName,
+        currentState ? "ON" : "OFF"
+    );
 
-        strcat( eventAndStateStr, elementName );
-        if ( currentState ) {
-            strcat( eventAndStateStr, "_ON" );
-        } else {
-            strcat( eventAndStateStr, "_OFF" );
-        }
+    // 2) Timestamp now
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char timeBuf[32];
+    strftime(timeBuf, sizeof(timeBuf),
+             "%Y-%m-%d %H:%M:%S", tm_info);
 
-        arrayOfStoredEvents[eventsIndex].seconds = time(NULL);
-        strcpy( arrayOfStoredEvents[eventsIndex].typeOfEvent,eventAndStateStr );
-        if ( eventsIndex < EVENT_MAX_STORAGE - 1 ) {
-            eventsIndex++;
-        } else {
-            eventsIndex = 0;
-        }
-
-        uartUsb.write( eventAndStateStr , strlen(eventAndStateStr) );
-        uartUsb.write( "\r\n", 2 );
+    // 3) Store in your events array
+    arrayOfStoredEvents[eventsIndex].seconds = now;
+    strncpy(arrayOfStoredEvents[eventsIndex].typeOfEvent,
+            eventStr, EVENT_NAME_MAX_LENGTH);
+    if (++eventsIndex >= EVENT_MAX_STORAGE) {
+        eventsIndex = 0;
     }
+
+    // 4) Send timestamp + event over UART
+    char outBuf[80];
+    int n = snprintf(outBuf, sizeof(outBuf),
+        "%s  %s\r\n", timeBuf, eventStr);
+    uartUsb.write(outBuf, n);
 }
 
 float analogReadingScaledWithTheLM35Formula( float analogReading )
